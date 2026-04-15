@@ -8,7 +8,7 @@ from transforms import common_transform
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
 
-def evaluate(encoder):
+def evaluate(encoder, device):
     encoder.eval()
 
     # define the test dataset and dataloader
@@ -21,7 +21,7 @@ def evaluate(encoder):
     with torch.no_grad():
         for data in tqdm(dataloaders):
             views, batch_labels = data
-            emb = encoder(views.to('cuda'))
+            emb = encoder(views.to(device))
 
             embeddings.append(emb.cpu().numpy())
             labels.append(batch_labels.numpy())

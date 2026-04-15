@@ -143,7 +143,7 @@ def main():
             sigreg_meter.update(sigreg_loss.item())
             print(f"Pred Loss: {pred_loss.item():.4f}, SigReg Loss: {sigreg_loss.item():.4f}, Total Loss: {loss.item():.4f}")
 
-        accuracy = evaluate(encoder)
+        accuracy = evaluate(encoder, params['device'])
         if accuracy > best_accuracy:
             best_accuracy = accuracy
             save_checkpoint('best_epoch.pth.tar', params, epoch + 1, encoder, optimizer)

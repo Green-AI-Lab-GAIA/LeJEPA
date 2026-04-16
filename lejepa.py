@@ -104,6 +104,8 @@ def main():
     optimizer = init_opt(encoder, params)
     best_accuracy = 0
 
+    scaler = torch.amp.GradScaler('cuda')
+
     # -- TRAINING LOOP
     for epoch in range(params['epochs']):
         epoch_start_time = time.time()
@@ -117,26 +119,29 @@ def main():
             views, labels = data
             views = transform(views.to(params['device']))
 
-            # Step 1. forward pass
-            all_views = torch.cat(views, dim=0) # [(global_views + local_views) * batch_size, C, H, W]
-            all_emb = encoder(all_views)
-            all_emb = all_emb.view(params['global_views'] + params['local_views'], params['batch_size'], -1)
-            emb_g = all_emb[:params['global_views']]
-            emb_l = all_emb[params['global_views']:]
+            with torch.amp.autocast(device_type='cuda', dtype=getattr(torch, params['dtype'])):
 
-            # Step 2. compute sigreg loss
-            sigreg_loss = torch.stack([sigreg(o) for o in emb_l]).mean()
+                # Step 1. forward pass
+                all_views = torch.cat(views, dim=0) # [(global_views + local_views) * batch_size, C, H, W]
+                all_emb = encoder(all_views)
+                all_emb = all_emb.view(params['global_views'] + params['local_views'], params['batch_size'], -1)
+                emb_g = all_emb[:params['global_views']]
+                emb_l = all_emb[params['global_views']:]
 
-            # Step 3. compute prediction loss
-            center = emb_g.mean(0, keepdim=True)
-            pred_loss = (emb_l - center).square().mean()
-            
-            lambd = params['lambda']
-            loss = (1 - lambd) * pred_loss + lambd * sigreg_loss
+                # Step 2. compute sigreg loss
+                sigreg_loss = torch.stack([sigreg(o) for o in emb_l]).mean()
+
+                # Step 3. compute prediction loss
+                center = emb_g.mean(0, keepdim=True)
+                pred_loss = (emb_l - center).square().mean()
+                
+                lambd = params['lambda']
+                loss = (1 - lambd) * pred_loss + lambd * sigreg_loss
 
             # Step 4. Optimization step
-            loss.backward()
-            optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
         
             # Step 5. logging
             pred_meter.update(pred_loss.item())

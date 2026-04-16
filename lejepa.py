@@ -104,7 +104,7 @@ def main():
     optimizer = init_opt(encoder, params)
     best_accuracy = 0
 
-    scaler = torch.amp.GradScaler('cuda')
+    scaler = torch.amp.GradScaler(params['device'])
 
     # -- TRAINING LOOP
     for epoch in range(params['epochs']):
@@ -113,13 +113,13 @@ def main():
         sigreg_meter = AverageMeter()
 
         for data in dataloader:
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
 
             # Step 0. load data to gpu
             views, labels = data
             views = transform(views.to(params['device']))
 
-            with torch.amp.autocast(device_type='cuda', dtype=getattr(torch, params['dtype'])):
+            with torch.amp.autocast(device_type=params['device'], dtype=getattr(torch, params['dtype'])):
 
                 # Step 1. forward pass
                 all_views = torch.cat(views, dim=0) # [(global_views + local_views) * batch_size, C, H, W]

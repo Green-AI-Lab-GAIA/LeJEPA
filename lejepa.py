@@ -1,9 +1,10 @@
 import os, torch, time, yaml
 from torchvision.datasets import CIFAR10
 
-from torchvision.models import resnet18, resnet50, ResNet50_Weights, ResNet18_Weights
+from torchvision import models
+import deit
 
-from utils import AverageMeter, CSVLogger
+from utils import AverageMeter, CSVLogger, WarmupCosineSchedule
 from transforms import MultiviewTransform, common_transform
 from evaluate import evaluate
 
@@ -32,23 +33,29 @@ def sigreg(x, M = 256):
 def init_model(params):
     
     if params['model'] == 'resnet18':
-        encoder = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
+        encoder = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
         encoder.fc = torch.nn.Linear(512, params['embedding_dim'])
     elif params['model'] == 'resnet50':
-        encoder = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
+        encoder = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
         encoder.fc = torch.nn.Linear(2048, params['embedding_dim'])
+    elif params['model'] == 'resnet101':
+        encoder = models.resnet101(weights=models.ResNet101_Weights.IMAGENET1K_V2)
+        encoder.fc = torch.nn.Linear(2048, params['embedding_dim'])
+    elif params['model'] == 'deit_1':
+        encoder = deit.deit_1(params['embedding_dim'])
 
-    # http://arxiv.org/abs/2002.05709
-    # Because CIFAR-10 images are much smaller than ImageNet images,
-    # we replace the first 7x7 Conv of stride 2 with 3x3 Conv of stride 1, 
-    # and also remove the first max pooling operation.
-    encoder.conv1 = torch.nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
-    encoder.maxpool = torch.nn.Identity()
+    if "resnet" in params['model']:
+        # http://arxiv.org/abs/2002.05709
+        # Because CIFAR-10 images are much smaller than ImageNet images,
+        # we replace the first 7x7 Conv of stride 2 with 3x3 Conv of stride 1, 
+        # and also remove the first max pooling operation.
+        encoder.conv1 = torch.nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+        encoder.maxpool = torch.nn.Identity()
 
     return encoder
 
 # Initialize the optimizer excluding weight decay for biases and normalization parameters
-def init_opt(encoder, params):
+def init_opt(encoder, params, ipe):
 
     param_groups = [
         {
@@ -60,8 +67,22 @@ def init_opt(encoder, params):
             'weight_decay': 0
         }
     ]
+
+    optimizer = torch.optim.AdamW(param_groups)
+
+    if params['lr_scheduler'] == 'warmup_cosine':
+        scheduler = WarmupCosineSchedule(
+            optimizer,
+            warmup_steps=params['epochs'] / 10 * ipe,
+            start_lr=float(params['lr']) / 10,
+            ref_lr=float(params['lr']),
+            final_lr=float(params['lr']) / 10,
+            T_max=int(1.25 * params['epochs'] * ipe)
+        )
+    else:
+        scheduler = None
     
-    return torch.optim.AdamW(param_groups, lr=float(params['lr']))
+    return optimizer, scheduler
 
 
 def save_checkpoint(path, params, epoch, encoder, optimizer):
@@ -74,6 +95,14 @@ def save_checkpoint(path, params, epoch, encoder, optimizer):
     }
     torch.save(save_dict, save_path)
 
+def load_checkpoint(path, encoder):
+    
+    save_path = os.path.join(path)
+    checkpoint = torch.load(save_path, map_location="cpu")
+    
+    encoder.load_state_dict(checkpoint['encoder'])
+    #optimizer.load_state_dict(checkpoint['opt'])
+    #return checkpoint['epoch']
 
 def main():
 
@@ -84,6 +113,10 @@ def main():
     
     os.makedirs(os.path.join(params['folder'], params['name']), exist_ok=True)
     os.system(f'cp config.yaml {os.path.join(params["folder"], params["name"], "config.yaml")}')
+
+    comment = input("Enter a comment for this run: ")
+    with open(f'checkpoints/{params["name"]}/comment.txt', 'w') as f:
+        f.write(comment)
     
     logger = CSVLogger(os.path.join(params['folder'], params['name'], 'log.csv'),
                           'epoch', 'pred_loss', 'sigreg_loss', 'accuracy', 'epoch_time')
@@ -101,7 +134,8 @@ def main():
     encoder = init_model(params).to(params['device'])
     encoder.train()
 
-    optimizer = init_opt(encoder, params)
+    ipe = len(dataloader) # iterations per epoch
+    optimizer, scheduler = init_opt(encoder, params, ipe)
     best_accuracy = 0
 
     scaler = torch.amp.GradScaler(params['device'])
@@ -139,7 +173,14 @@ def main():
                 loss = (1 - lambd) * pred_loss + lambd * sigreg_loss
 
             # Step 4. Optimization step
+            if scheduler is not None:
+                new_lr = scheduler.step()
             scaler.scale(loss).backward()
+
+            if params['grad_clip'] > 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(encoder.parameters(), params['grad_clip'])
+
             scaler.step(optimizer)
             scaler.update()
         
